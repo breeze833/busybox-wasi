@@ -21,7 +21,7 @@ echo " Building busybox-wasi (v${BB_VER}) for wasm32-wasip1"
 echo "=========================================================="
 
 # 1. Locate wasi-sdk toolchain
-WASI_SDK_VERSION="${WASI_SDK_VERSION:-25.0}"
+WASI_SDK_VERSION="${WASI_SDK_VERSION:-29.0}"
 WASI_SDK_MAJOR="${WASI_SDK_VERSION%%.*}"
 
 if [ -z "${WASI_SDK_PATH:-}" ] || [ ! -x "${WASI_SDK_PATH}/bin/clang" ]; then

@@ -33,7 +33,7 @@ jobs:
 
       - name: Set up wasi-sdk
         run: |
-          WASI_SDK_VERSION="25.0"
+          WASI_SDK_VERSION="29.0"
           WASI_SDK_MAJOR="${WASI_SDK_VERSION%%.*}"
           mkdir -p wasi-sdk-tmp
           echo "Downloading wasi-sdk-${WASI_SDK_VERSION}..."
