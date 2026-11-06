@@ -20,29 +20,31 @@ echo "=========================================================="
 echo " Building busybox-wasi (v${BB_VER}) for wasm32-wasip1"
 echo "=========================================================="
 
-# 1. Detect toolchain (prefer wasi-sdk / clang-wasi toolchain)
-ZIG=""
-if [ -n "${WASI_SDK_PATH:-}" ] && [ -x "${WASI_SDK_PATH}/bin/clang" ]; then
-  ZIG=""
-elif [ -x "/home/breeze/work/projects/clang-wasi/wasi-sdk/bin/clang" ]; then
-  export WASI_SDK_PATH="/home/breeze/work/projects/clang-wasi/wasi-sdk"
-  ZIG=""
-elif command -v zig >/dev/null 2>&1; then
-  ZIG="zig"
-elif [ -x "/home/breeze/.asdf/shims/python" ] && /home/breeze/.asdf/shims/python -c 'import ziglang' >/dev/null 2>&1; then
-  ZIG="/home/breeze/.asdf/shims/python -m ziglang"
-elif python3 -c 'import ziglang' >/dev/null 2>&1; then
-  ZIG="python3 -m ziglang"
+# 1. Locate wasi-sdk toolchain
+WASI_SDK_VERSION="${WASI_SDK_VERSION:-25.0}"
+WASI_SDK_MAJOR="${WASI_SDK_VERSION%%.*}"
+
+if [ -z "${WASI_SDK_PATH:-}" ] || [ ! -x "${WASI_SDK_PATH}/bin/clang" ]; then
+  if [ -x "/home/breeze/work/projects/clang-wasi/wasi-sdk/bin/clang" ]; then
+    export WASI_SDK_PATH="/home/breeze/work/projects/clang-wasi/wasi-sdk"
+  elif [ -x "${BUILD_DIR}/wasi-sdk/bin/clang" ]; then
+    export WASI_SDK_PATH="${BUILD_DIR}/wasi-sdk"
+  else
+    echo "wasi-sdk not found. Downloading wasi-sdk-${WASI_SDK_VERSION}..."
+    mkdir -p "${BUILD_DIR}/wasi-sdk-tmp"
+    curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_MAJOR}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz" | tar -xz -C "${BUILD_DIR}/wasi-sdk-tmp"
+    mv "${BUILD_DIR}"/wasi-sdk-tmp/wasi-sdk-${WASI_SDK_VERSION}* "${BUILD_DIR}/wasi-sdk"
+    rm -rf "${BUILD_DIR}/wasi-sdk-tmp"
+    export WASI_SDK_PATH="${BUILD_DIR}/wasi-sdk"
+  fi
 fi
 
-if [ -n "${WASI_SDK_PATH:-}" ]; then
-  echo "Using clang-wasi / wasi-sdk toolchain: ${WASI_SDK_PATH}"
-elif [ -n "${ZIG}" ]; then
-  echo "Using Zig toolchain: ${ZIG}"
-else
-  echo "Error: No wasm32-wasi toolchain found (wasi-sdk or ziglang required)." >&2
+if [ ! -x "${WASI_SDK_PATH}/bin/clang" ]; then
+  echo "Error: wasi-sdk clang not found at ${WASI_SDK_PATH}/bin/clang" >&2
   exit 1
 fi
+
+echo "Using wasi-sdk: ${WASI_SDK_PATH}"
 
 # 2. Download and verify BusyBox tarball
 TARBALL_PATH="${BUILD_DIR}/${BB_TARBALL}"
@@ -81,7 +83,14 @@ yes "" | make -C "${BB_DIR}" oldconfig HOSTCC=gcc >/dev/null 2>&1 || true
 set -o pipefail
 
 # 6. Setup cross-compilation wrappers
-CFLAGS_WASM="-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=true \
+# Probe exception handling / sjlj flags across wasi-sdk versions (LLVM 19 vs 20+)
+if echo 'int main(void){return 0;}' | "${WASI_SDK_PATH}/bin/clang" -x c - -c -mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=true -o /dev/null 2>/dev/null; then
+  SJLJ_FLAGS="-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=true"
+else
+  SJLJ_FLAGS="-mexception-handling -mllvm -wasm-enable-sjlj"
+fi
+
+CFLAGS_WASM="${SJLJ_FLAGS} \
   -fno-sanitize=all \
   -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_GETPID \
   -D_WASI_EMULATED_PROCESS_CLOCKS -D_GNU_SOURCE -DSOCK_RDM=4 \
@@ -92,15 +101,9 @@ CFLAGS_WASM="-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-lega
 WORK_BIN="${BUILD_DIR}/bin"
 mkdir -p "${WORK_BIN}"
 
-if [ -n "${ZIG}" ]; then
-  CC_CMD="${ZIG} cc --target=wasm32-wasi ${CFLAGS_WASM}"
-  WASM_LD="${ZIG} wasm-ld"
-  AR_CMD="${ZIG} ar"
-else
-  CC_CMD="${WASI_SDK_PATH}/bin/clang --target=wasm32-wasi ${CFLAGS_WASM}"
-  WASM_LD="${WASI_SDK_PATH}/bin/wasm-ld"
-  AR_CMD="${WASI_SDK_PATH}/bin/llvm-ar"
-fi
+CC_CMD="${WASI_SDK_PATH}/bin/clang --target=wasm32-wasi ${CFLAGS_WASM}"
+WASM_LD="${WASI_SDK_PATH}/bin/wasm-ld"
+AR_CMD="${WASI_SDK_PATH}/bin/llvm-ar"
 
 cat > "${WORK_BIN}/zcc" <<EOF
 #!/bin/sh
@@ -141,31 +144,21 @@ zcc -O2 -c "${SHIM_DIR}/wasistubs.c" -o "${BUILD_DIR}/wasistubs.o"
 zcc -O2 -c "${SHIM_DIR}/ppoll.c" -o "${BUILD_DIR}/ppoll.o"
 zcc -O2 -c "${SHIM_DIR}/rt.c" -o "${BUILD_DIR}/rt.o"
 
-# 9. Probe toolchain libraries for linking
-if [ -n "${ZIG}" ]; then
-  echo 'int main(void){return 0;}' > "${BUILD_DIR}/zprobe.c"
-  ${ZIG} cc --target=wasm32-wasi "${BUILD_DIR}/zprobe.c" -o "${BUILD_DIR}/zprobe.wasm" -v > "${BUILD_DIR}/zprobe.log" 2>&1 || true
-  probe(){ tr ' "' '\n\n' < "${BUILD_DIR}/zprobe.log" | grep "$1" | head -1; }
-  CRT=$(probe crt1-command.o)
-  LIBC=$(probe '/libc.a')
-  ZIGC=$(probe libzigc.a)
-  RTLIB=$(probe libcompiler_rt.a)
-  EXTRA_LIBS="${LIBC} ${ZIGC} ${RTLIB}"
-else
-  SYSROOT_LIB="${WASI_SDK_PATH}/share/wasi-sysroot/lib/wasm32-wasip1"
-  [ -d "${SYSROOT_LIB}" ] || SYSROOT_LIB="${WASI_SDK_PATH}/share/wasi-sysroot/lib/wasm32-wasi"
-  CRT="${SYSROOT_LIB}/crt1-command.o"
-  LIBC="${SYSROOT_LIB}/libc.a"
-  EMU_GETPID="${SYSROOT_LIB}/libwasi-emulated-getpid.a"
-  EMU_SIGNAL="${SYSROOT_LIB}/libwasi-emulated-signal.a"
-  EMU_MMAN="${SYSROOT_LIB}/libwasi-emulated-mman.a"
-  EMU_CLOCKS="${SYSROOT_LIB}/libwasi-emulated-process-clocks.a"
-  RTLIB=$(find "${WASI_SDK_PATH}" -name "libclang_rt.builtins*.a" 2>/dev/null | grep -E "wasm32-unknown-wasi/|wasm32-wasi/|wasm32-unknown-wasip1/|/wasi/" | head -1)
-  if [ -z "${RTLIB}" ]; then
-    RTLIB=$(find "${WASI_SDK_PATH}" -name "libclang_rt.builtins*.a" 2>/dev/null | head -1)
-  fi
-  EXTRA_LIBS="${LIBC} ${EMU_GETPID} ${EMU_SIGNAL} ${EMU_MMAN} ${EMU_CLOCKS} ${RTLIB}"
+# 9. Sysroot and support libraries
+SYSROOT_LIB="${WASI_SDK_PATH}/share/wasi-sysroot/lib/wasm32-wasip1"
+[ -d "${SYSROOT_LIB}" ] || SYSROOT_LIB="${WASI_SDK_PATH}/share/wasi-sysroot/lib/wasm32-wasi"
+
+CRT="${SYSROOT_LIB}/crt1-command.o"
+LIBC="${SYSROOT_LIB}/libc.a"
+EMU_GETPID="${SYSROOT_LIB}/libwasi-emulated-getpid.a"
+EMU_SIGNAL="${SYSROOT_LIB}/libwasi-emulated-signal.a"
+EMU_MMAN="${SYSROOT_LIB}/libwasi-emulated-mman.a"
+EMU_CLOCKS="${SYSROOT_LIB}/libwasi-emulated-process-clocks.a"
+RTLIB=$(find "${WASI_SDK_PATH}" -name "libclang_rt.builtins*.a" 2>/dev/null | grep -E "wasm32-unknown-wasi/|wasm32-wasi/|wasm32-unknown-wasip1/|/wasi/" | head -1)
+if [ -z "${RTLIB}" ]; then
+  RTLIB=$(find "${WASI_SDK_PATH}" -name "libclang_rt.builtins*.a" 2>/dev/null | head -1)
 fi
+EXTRA_LIBS="${LIBC} ${EMU_GETPID} ${EMU_SIGNAL} ${EMU_MMAN} ${EMU_CLOCKS} ${RTLIB}"
 
 # 10. Final link
 echo "Linking busybox.wasm..."
