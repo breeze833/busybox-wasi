@@ -1,0 +1,33 @@
+{
+  "name": "busybox-wasi",
+  "version": "1.38.0",
+  "description": "BusyBox ash shell and core utilities compiled for WASI Preview 1",
+  "type": "commonjs",
+  "main": "bin/cli.js",
+  "bin": {
+    "busybox-wasi": "./bin/cli.js"
+  },
+  "files": [
+    "bin/cli.js",
+    "bin/busybox.wasm",
+    "README.md",
+    "LICENSE",
+    "SPEC.md"
+  ],
+  "scripts": {
+    "build": "./scripts/build.sh",
+    "test": "node test/test-applets.js && node test/test-ash.js",
+    "pack": "npm pack"
+  },
+  "keywords": [
+    "busybox",
+    "ash",
+    "sh",
+    "shell",
+    "wasi",
+    "wasip1",
+    "wasm",
+    "webassembly"
+  ],
+  "license": "GPL-2.0-only"
+}
