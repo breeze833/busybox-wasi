@@ -1,7 +1,9 @@
-const { spawnSync } = require('node:child_process');
-const assert = require('node:assert');
-const path = require('node:path');
+import { spawnSync } from 'node:child_process';
+import assert from 'node:assert';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliPath = path.join(__dirname, '..', 'bin', 'cli.js');
 
 function runSh(script) {

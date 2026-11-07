@@ -2,14 +2,19 @@
   "name": "busybox-wasi",
   "version": "1.38.0",
   "description": "BusyBox ash shell and core utilities compiled for WASI Preview 1",
-  "type": "commonjs",
+  "type": "module",
   "main": "bin/cli.js",
   "bin": {
     "busybox-wasi": "./bin/cli.js"
   },
+  "exports": {
+    ".": "./bin/cli.js",
+    "./host": "./src/host.js"
+  },
   "files": [
     "bin/cli.js",
     "bin/busybox.wasm",
+    "src/host.js",
     "README.md",
     "LICENSE",
     "SPEC.md",
@@ -18,8 +23,11 @@
   ],
   "scripts": {
     "build": "./scripts/build.sh",
-    "test": "node test/test-applets.js && node test/test-ash.js",
-    "pack": "npm pack"
+    "test": "node test/test-applets.js && node test/test-ash.js && node examples/host-reference.js",
+    "test:applets": "node test/test-applets.js",
+    "test:ash": "node test/test-ash.js",
+    "test:host": "node examples/host-reference.js",
+    "pack": "mkdir -p dist && npm pack --pack-destination dist/"
   },
   "keywords": [
     "busybox",

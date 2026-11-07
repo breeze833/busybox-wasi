@@ -88,6 +88,26 @@ A GitHub Actions workflow ([`.github/workflows/release.yml`](.github/workflows/r
 
 ---
 
+### Downstream Integration via NPM
+
+Downstream projects (e.g. `wasm-c-ide`) can directly install the published npm package tarball from GitHub Releases:
+
+```json
+{
+  "dependencies": {
+    "busybox-wasi": "https://github.com/breeze833/busybox-wasi/releases/download/latest/busybox-wasi-1.38.0.tgz"
+  }
+}
+```
+
+And import the modular host bridge and in-memory pipe engine in JavaScript/TypeScript:
+
+```javascript
+import { MemoryPipe, createBusyboxBridge, wrapWasiPipes } from 'busybox-wasi/host';
+```
+
+---
+
 ## Acknowledgements
 
 This project's WASI Preview 1 port builds upon and adapts the pioneering work of **Alexandre Gaigalas** ([@alganet](https://github.com/alganet)) in [**`alganet/wasi-sh`**](https://github.com/alganet/wasi-sh). Specifically:

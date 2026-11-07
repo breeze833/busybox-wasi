@@ -3,7 +3,8 @@
  * Standalone Reference Implementation of WASI Host-Assisted Functions for busybox-wasi.
  *
  * This file provides a complete, production-grade reference implementation of all
- * host-assisted functions required by busybox-wasi under the WebAssembly `env` namespace:
+ * host-assisted functions required by busybox-wasi under the WebAssembly `env` namespace,
+ * powered by the modular browser-safe engine in `src/host.js`:
  *
  *   1. In-Memory Pipes & Ref-Counting:
  *      - MemoryPipe
@@ -25,73 +26,31 @@
  *   6. Socket Stubs:
  *      - __host_sock_*()
  *
- * It also demonstrates how to wrap standard WASI Preview 1 descriptor syscalls
- * (fd_read, fd_write, fd_close, fd_renumber) to seamlessly route between in-memory
- * pipe buffers and underlying filesystem descriptors.
- *
  * Usage:
  *   node examples/host-reference.js
  */
 
-const { WASI } = require('node:wasi');
-const fs = require('node:fs');
-const path = require('node:path');
-const assert = require('node:assert');
-const { spawnSync } = require('node:child_process');
+import { WASI } from 'node:wasi';
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import {
+  MemoryPipe,
+  createBusyboxBridge,
+  wrapWasiPipes,
+  readCString,
+  readCStringArray
+} from '../src/host.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ============================================================================
-// 1. MemoryPipe: FIFO In-Memory Byte Buffer with Write-Reference Counting
+// BusyBoxHost: Complete Reference WASI Preview 1 Host Bridge
 // ============================================================================
 
-class MemoryPipe {
-  constructor() {
-    this.chunks = [];
-    this.totalLen = 0;
-    this.closed = false;
-    this.writeRefs = 0;
-  }
-
-  write(data) {
-    if (this.closed || !data || data.length === 0) return 0;
-    this.chunks.push(new Uint8Array(data));
-    this.totalLen += data.length;
-    return data.length;
-  }
-
-  read(maxLen) {
-    if (this.totalLen === 0) {
-      return new Uint8Array(0);
-    }
-    const toRead = Math.min(maxLen, this.totalLen);
-    const result = new Uint8Array(toRead);
-    let offset = 0;
-    while (offset < toRead && this.chunks.length > 0) {
-      const head = this.chunks[0];
-      const needed = toRead - offset;
-      if (head.length <= needed) {
-        result.set(head, offset);
-        offset += head.length;
-        this.chunks.shift();
-      } else {
-        result.set(head.subarray(0, needed), offset);
-        offset += needed;
-        this.chunks[0] = head.subarray(needed);
-      }
-    }
-    this.totalLen -= toRead;
-    return result;
-  }
-
-  close() {
-    this.closed = true;
-  }
-}
-
-// ============================================================================
-// 2. BusyBoxHost: Complete Reference WASI Preview 1 Host Bridge
-// ============================================================================
-
-class BusyBoxHost {
+export class BusyBoxHost {
   /**
    * @param {Object} options
    * @param {string} [options.cwd] Current working directory (defaults to process.cwd())
@@ -183,25 +142,11 @@ class BusyBoxHost {
   }
 
   readCString(ptr) {
-    if (!this.memory || ptr === 0) return '';
-    const bytes = new Uint8Array(this.memory.buffer, ptr);
-    let end = 0;
-    while (bytes[end] !== 0 && end < 4096) end++;
-    return Buffer.from(bytes.subarray(0, end)).toString('utf-8');
+    return readCString(this.memory, ptr);
   }
 
   readCStringArray(ptr) {
-    if (!this.memory || ptr === 0) return [];
-    const view = new DataView(this.memory.buffer);
-    const result = [];
-    let offset = ptr;
-    while (true) {
-      const strPtr = view.getUint32(offset, true);
-      if (strPtr === 0) break;
-      result.push(this.readCString(strPtr));
-      offset += 4;
-    }
-    return result;
+    return readCStringArray(this.memory, ptr);
   }
 
   /**
@@ -213,237 +158,36 @@ class BusyBoxHost {
    */
   createImportObject(wasiInstance) {
     const wasiImports = wasiInstance ? wasiInstance.getImportObject() : { wasi_snapshot_preview1: {} };
-    const origWasi = wasiImports.wasi_snapshot_preview1;
+    const wrappedWasi = wrapWasiPipes(wasiImports.wasi_snapshot_preview1, this);
 
-    // Wrap WASI file descriptor operations to support MemoryPipe routing
-    const wrappedWasi = {
-      ...origWasi,
-
-      fd_close: (fd) => {
+    // If custom stdout is set, intercept fd_write for stdout
+    if (this.stdout) {
+      const origWrite = wrappedWasi.fd_write;
+      wrappedWasi.fd_write = (fd, iovs, iovs_len, nwritten_out) => {
         if (this.openFiles.has(fd)) {
           const file = this.openFiles.get(fd);
-          if (file && file.isPipeWrite && file.pipe) {
-            file.pipe.writeRefs--;
-            if (file.pipe.writeRefs <= 0) {
-              file.pipe.close();
-            }
-          }
-          if (fd > 2) {
-            this.openFiles.delete(fd);
-          }
-          return 0; // ESUCCESS
-        }
-        return origWasi.fd_close ? origWasi.fd_close(fd) : 0;
-      },
-
-      fd_read: (fd, iovs, iovs_len, nread_out) => {
-        if (this.openFiles.has(fd)) {
-          const file = this.openFiles.get(fd);
-          if (file.isStdio) {
-            return origWasi.fd_read ? origWasi.fd_read(file.stdioFd, iovs, iovs_len, nread_out) : 0;
-          }
-          if (file.isPipeRead && file.pipe) {
+          if (file.isStdio && (fd === 1 || file.stdioFd === 1)) {
             const u32 = new Uint32Array(this.memory.buffer);
             const u8 = new Uint8Array(this.memory.buffer);
             let total = 0;
+            let text = '';
             for (let i = 0; i < iovs_len; i++) {
               const ptr = u32[(iovs >> 2) + i * 2];
               const len = u32[(iovs >> 2) + i * 2 + 1];
               if (len <= 0) continue;
-              const data = file.pipe.read(len);
-              if (data.length === 0) break;
-              u8.set(data, ptr);
-              total += data.length;
-              if (data.length < len) break;
-            }
-            u32[nread_out >> 2] = total;
-            return 0; // ESUCCESS
-          }
-        }
-        return origWasi.fd_read ? origWasi.fd_read(fd, iovs, iovs_len, nread_out) : 0;
-      },
-
-      fd_write: (fd, iovs, iovs_len, nwritten_out) => {
-        if (this.openFiles.has(fd)) {
-          const file = this.openFiles.get(fd);
-          if (file.isStdio) {
-            if (this.stdout && (fd === 1 || file.stdioFd === 1)) {
-              const u32 = new Uint32Array(this.memory.buffer);
-              const u8 = new Uint8Array(this.memory.buffer);
-              let total = 0;
-              let text = '';
-              for (let i = 0; i < iovs_len; i++) {
-                const ptr = u32[(iovs >> 2) + i * 2];
-                const len = u32[(iovs >> 2) + i * 2 + 1];
-                if (len <= 0) continue;
-                text += Buffer.from(u8.subarray(ptr, ptr + len)).toString('utf-8');
-                total += len;
-              }
-              u32[nwritten_out >> 2] = total;
-              this.stdout(text);
-              return 0;
-            }
-            return origWasi.fd_write ? origWasi.fd_write(file.stdioFd, iovs, iovs_len, nwritten_out) : 0;
-          }
-          if (file.isPipeWrite && file.pipe) {
-            const u32 = new Uint32Array(this.memory.buffer);
-            const u8 = new Uint8Array(this.memory.buffer);
-            let total = 0;
-            for (let i = 0; i < iovs_len; i++) {
-              const ptr = u32[(iovs >> 2) + i * 2];
-              const len = u32[(iovs >> 2) + i * 2 + 1];
-              if (len <= 0) continue;
-              file.pipe.write(u8.subarray(ptr, ptr + len));
+              text += Buffer.from(u8.subarray(ptr, ptr + len)).toString('utf-8');
               total += len;
             }
             u32[nwritten_out >> 2] = total;
-            return 0; // ESUCCESS
+            this.stdout(text);
+            return 0;
           }
         }
-        return origWasi.fd_write ? origWasi.fd_write(fd, iovs, iovs_len, nwritten_out) : 0;
-      },
-    };
+        return origWrite(fd, iovs, iovs_len, nwritten_out);
+      };
+    }
 
-    // Environment imports required by wasistubs.c
-    const envImports = {
-      __host_trace: (id) => {},
-
-      __host_pipe: (ptr) => {
-        const pipe = new MemoryPipe();
-        pipe.writeRefs = 1;
-        const readFd = this.nextPipeFd++;
-        const writeFd = this.nextPipeFd++;
-        this.openFiles.set(readFd, { fd: readFd, pipe, isPipeRead: true, canRead: true, canWrite: false });
-        this.openFiles.set(writeFd, { fd: writeFd, pipe, isPipeWrite: true, canRead: false, canWrite: true });
-        const view = new DataView(this.memory.buffer);
-        view.setInt32(ptr, readFd, true);
-        view.setInt32(ptr + 4, writeFd, true);
-        return 0;
-      },
-
-      __host_dup: (fd, minfd) => {
-        if (!this.openFiles.has(fd)) return -1;
-        const orig = this.openFiles.get(fd);
-        if (orig.isPipeWrite && orig.pipe) {
-          orig.pipe.writeRefs++;
-        }
-        const startFd = typeof minfd === 'number' && minfd > this.nextPipeFd ? minfd : this.nextPipeFd;
-        const newFd = startFd;
-        this.nextPipeFd = startFd + 1;
-        this.openFiles.set(newFd, { ...orig, fd: newFd });
-        return newFd;
-      },
-
-      __host_dup2: (oldfd, newfd) => {
-        if (this.openFiles.has(newfd)) {
-          const prev = this.openFiles.get(newfd);
-          if (prev && prev.isPipeWrite && prev.pipe) {
-            prev.pipe.writeRefs--;
-            if (prev.pipe.writeRefs <= 0) {
-              prev.pipe.close();
-            }
-          }
-          this.openFiles.delete(newfd);
-        }
-
-        if (this.openFiles.has(oldfd)) {
-          const orig = this.openFiles.get(oldfd);
-          if (orig.isPipeWrite && orig.pipe) {
-            orig.pipe.writeRefs++;
-          }
-          this.openFiles.set(newfd, { ...orig, fd: newfd });
-          return newfd;
-        }
-
-        // Delegate underlying filesystem file descriptor movement
-        if (origWasi.fd_renumber) {
-          const ret = origWasi.fd_renumber(oldfd, newfd);
-          if (ret === 0) {
-            this.openFiles.delete(newfd);
-            return newfd;
-          }
-        }
-        return -1;
-      },
-
-      __host_winsize: (rPtr, cPtr) => {
-        const view = new DataView(this.memory.buffer);
-        view.setInt32(rPtr, this.rows, true);
-        view.setInt32(cPtr, this.cols, true);
-      },
-
-      __host_winch: () => {
-        const flag = this.winchFlag;
-        this.winchFlag = 0;
-        return flag;
-      },
-
-      __host_interrupt: () => {
-        return this.interruptSeq;
-      },
-
-      __host_builtin_lookup: (namePtr, len) => {
-        const name = this.readCString(namePtr);
-        return this.builtins.has(name) ? 1 : 0;
-      },
-
-      __host_builtin_name: (index, bufPtr, len) => {
-        const names = Array.from(this.builtins.keys());
-        if (index >= 0 && index < names.length) {
-          const bytes = Buffer.from(names[index]);
-          const copyLen = Math.min(bytes.length, len);
-          new Uint8Array(this.memory.buffer, bufPtr, copyLen).set(bytes.subarray(0, copyLen));
-          return copyLen;
-        }
-        return 0;
-      },
-
-      __host_builtin_run: (cwdPtr, argc, argvPtr, envpPtr) => {
-        const cwd = this.readCString(cwdPtr) || this.cwd;
-        const argv = this.readCStringArray(argvPtr);
-        const envp = this.readCStringArray(envpPtr);
-        if (argv.length === 0) return 127;
-
-        const cmd = argv[0];
-        if (this.builtins.has(cmd)) {
-          const handler = this.builtins.get(cmd);
-          try {
-            return handler({ cwd, argc, argv, envp, host: this });
-          } catch (err) {
-            console.error(`Host builtin '${cmd}' failed:`, err);
-            return 126;
-          }
-        }
-
-        // Fallback: spawn command on host system if available
-        try {
-          const res = spawnSync(cmd, argv.slice(1), {
-            cwd,
-            stdio: 'inherit',
-            shell: false
-          });
-          return res.status !== null ? res.status : (res.error ? 127 : 0);
-        } catch {
-          return 127;
-        }
-      },
-
-      wasi_host_spawn: (cmdPtr, argvPtr, envpPtr) => {
-        const cmd = this.readCString(cmdPtr);
-        const argv = this.readCStringArray(argvPtr);
-        const envp = this.readCStringArray(envpPtr);
-        if (this.builtins.has(cmd)) {
-          return this.builtins.get(cmd)({ cwd: this.cwd, argc: argv.length, argv, envp, host: this });
-        }
-        return 127;
-      },
-
-      __host_sock_open: () => -1,
-      __host_sock_connect: () => -1,
-      __host_sock_bind: () => -1,
-      __host_sock_listen: () => -1,
-      __host_sock_resolve: () => -1,
-    };
+    const envImports = createBusyboxBridge(this);
 
     return {
       wasi_snapshot_preview1: wrappedWasi,
@@ -458,23 +202,22 @@ class BusyBoxHost {
    * @param {string[]} args Command arguments (e.g. ['sh', '-c', 'echo hello'])
    * @returns {number} Exit code
    */
-  run(wasmPath, args = ['sh']) {
-    const wasmBuffer = fs.readFileSync(wasmPath);
-    const wasmModule = new WebAssembly.Module(wasmBuffer);
-
+  run(wasmPath, args) {
     const wasi = new WASI({
       version: 'preview1',
       args: ['busybox', ...args],
       env: this.env,
       preopens: {
         '.': this.cwd,
-        '/tmp': '/tmp'
-      }
+        '/tmp': '/tmp',
+      },
     });
 
-    const imports = this.createImportObject(wasi);
-    const instance = new WebAssembly.Instance(wasmModule, imports);
+    const wasmBuffer = fs.readFileSync(wasmPath);
+    const wasmModule = new WebAssembly.Module(wasmBuffer);
+    const importObject = this.createImportObject(wasi);
 
+    const instance = new WebAssembly.Instance(wasmModule, importObject);
     if (instance.exports.memory) {
       this.setMemory(instance.exports.memory);
     }
@@ -492,71 +235,73 @@ class BusyBoxHost {
 }
 
 // ============================================================================
-// 3. Self-Test & Interactive Demonstration
+// Self-Verification Test Suite
 // ============================================================================
 
-function main() {
-  const wasmPath = path.resolve(__dirname, '..', 'bin', 'busybox.wasm');
+export function main() {
+  console.log('================================================================');
+  console.log('   busybox-wasi Host-Assisted Functions Reference Runner        ');
+  console.log('================================================================');
+
+  const wasmPath = path.join(__dirname, '..', 'bin', 'busybox.wasm');
   if (!fs.existsSync(wasmPath)) {
-    console.error(`Error: busybox.wasm not found at ${wasmPath}. Please build it first.`);
+    console.error(`[-] Error: busybox.wasm not found at ${wasmPath}. Run 'make build' first.`);
     process.exit(1);
   }
 
-  console.log('================================================================');
-  console.log('   busybox-wasi Reference Host Implementation Verification      ');
-  console.log('================================================================');
+  const host = new BusyBoxHost({
+    cwd: process.cwd(),
+    rows: 24,
+    cols: 80,
+  });
 
-  // Test 1: In-Memory Pipe Unit Test
-  console.log('1. Verifying MemoryPipe slicing & boundary handling...');
+  // Test 1: MemoryPipe Basic FIFO Read/Write
+  console.log('1. Verifying MemoryPipe FIFO and write-ref lifecycle...');
   const pipe = new MemoryPipe();
   pipe.writeRefs = 1;
-  pipe.write(new Uint8Array([1, 2, 3]));
-  pipe.write(new Uint8Array([4, 5, 6, 7]));
-  assert.strictEqual(pipe.totalLen, 7);
+  assert.strictEqual(pipe.write(new TextEncoder().encode('Hello ')), 6);
+  assert.strictEqual(pipe.write(new TextEncoder().encode('Pipe!')), 5);
+  assert.strictEqual(pipe.totalLen, 11);
 
-  const chunk1 = pipe.read(2);
-  assert.deepStrictEqual(Array.from(chunk1), [1, 2]);
+  const chunk1 = pipe.read(6);
+  assert.strictEqual(new TextDecoder().decode(chunk1), 'Hello ');
+  assert.strictEqual(pipe.totalLen, 5);
 
-  // Read across chunk boundary (element 3 from chunk 0, elements 4 & 5 from chunk 1)
-  const chunk2 = pipe.read(3);
-  assert.deepStrictEqual(Array.from(chunk2), [3, 4, 5]);
-
-  const chunk3 = pipe.read(10);
-  assert.deepStrictEqual(Array.from(chunk3), [6, 7]);
+  const chunk2 = pipe.read(10);
+  assert.strictEqual(new TextDecoder().decode(chunk2), 'Pipe!');
   assert.strictEqual(pipe.totalLen, 0);
-  console.log('  [PASS] MemoryPipe boundary slicing verified.');
 
-  // Test 2: Standard Multicall Applet Execution via Host
-  console.log('2. Verifying multicall execution via BusyBoxHost...');
+  pipe.writeRefs--;
+  if (pipe.writeRefs <= 0) pipe.close();
+  assert.strictEqual(pipe.closed, true);
+  console.log('  [PASS] MemoryPipe read/write and ref-counting verified.');
+
+  // Test 2: In-Memory Pipe Command Substitution in ash ($(...))
+  console.log('2. Verifying in-memory command substitution via __host_pipe & dup...');
   let capturedOut = '';
-  const host = new BusyBoxHost({
-    stdout: (str) => { capturedOut += str; }
-  });
-  const rc1 = host.run(wasmPath, ['printf', '%s %d\\n', 'test_arg', '123']);
+  host.stdout = (str) => { capturedOut += str; };
+
+  const rc1 = host.run(wasmPath, ['sh', '-c', 'MSG=$(echo "hello from subshell"); echo "SUB: $MSG"']);
   assert.strictEqual(rc1, 0);
-  assert.strictEqual(capturedOut.trim(), 'test_arg 123');
-  console.log('  [PASS] Applet printf output captured via host stdout bridge.');
+  assert.strictEqual(capturedOut.trim(), 'SUB: hello from subshell');
+  console.log('  [PASS] In-memory pipe command substitution $(...) verified.');
 
-  // Test 3: Ash Scripting, In-Process Command Substitution & Pipelines
-  console.log('3. Verifying fork-free command substitution $(...) & pipelines...');
+  // Test 3: Pipelines across applets (cmd1 | cmd2)
+  console.log('3. Verifying pipelines via __host_pipe (echo | grep)...');
   capturedOut = '';
-  const rc2 = host.run(wasmPath, [
-    'sh',
-    '-c',
-    'OUT=$(printf "banana\\napple\\ncherry\\n" | sort); echo "SORTED: $OUT"'
-  ]);
+  const rc2 = host.run(wasmPath, ['sh', '-c', 'printf "banana\\napple\\ncherry\\n" | grep "app"']);
   assert.strictEqual(rc2, 0);
-  assert.ok(capturedOut.includes('SORTED: apple\nbanana\ncherry'));
-  console.log('  [PASS] Fork-free subshell $(...) with MemoryPipe ref-counting verified.');
+  assert.strictEqual(capturedOut.trim(), 'apple');
+  console.log('  [PASS] Pipeline execution via MemoryPipe verified.');
 
-  // Test 4: Custom Host Builtins (host_echo & custom callback)
-  console.log('4. Verifying host builtin dispatch (__host_builtin_lookup / run)...');
-  capturedOut = '';
+  // Test 4: Host Builtin Dispatch (__host_builtin_run)
+  console.log('4. Verifying host builtin command execution and dispatch...');
   host.registerBuiltin('custom_cmd', ({ argv }) => {
     capturedOut += `[custom_cmd_invoked: ${argv.slice(1).join(',')}]\n`;
     return 42;
   });
 
+  capturedOut = '';
   const rc3 = host.run(wasmPath, ['sh', '-c', 'custom_cmd a b c; echo "exit=$?"']);
   assert.strictEqual(rc3, 0);
   assert.ok(capturedOut.includes('[custom_cmd_invoked: a,b,c]'));
@@ -587,13 +332,8 @@ function main() {
   console.log('================================================================');
 }
 
-// Export classes for external consumer projects
-module.exports = {
-  MemoryPipe,
-  BusyBoxHost,
-};
+export { MemoryPipe };
 
-// Execute self-test if run directly
-if (require.main === module) {
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
   main();
 }

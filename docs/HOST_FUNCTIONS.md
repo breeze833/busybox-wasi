@@ -170,14 +170,36 @@ WASI Preview 1 does not support asynchronous POSIX signals (`SIGINT`, `SIGTERM`)
 
 ---
 
-## 7. Reference JavaScript Host Implementation
+## 7. Modular Host Bridge Engine & Reference Implementation
 
-A complete, production-grade reference implementation with built-in self-tests is provided in [**`examples/host-reference.js`**](file:///home/breeze/projects/busybox-wasi/examples/host-reference.js).
+`busybox-wasi` provides a zero-dependency, browser-safe host bridge engine in [**`src/host.js`**](file:///home/breeze/projects/busybox-wasi/src/host.js) exported under the subpath `busybox-wasi/host`, alongside a standalone reference runner in [**`examples/host-reference.js`**](file:///home/breeze/projects/busybox-wasi/examples/host-reference.js).
 
-External projects (such as `wasm-c-ide`, browser web workers, or custom Node.js execution harnesses) can import `BusyBoxHost` and `MemoryPipe` directly:
+### 7.1 Modular Engine Integration (`busybox-wasi/host`)
+
+Browser IDEs (like `wasm-c-ide`), Web Workers, and custom WASI runtimes can import the modular bridge directly:
 
 ```javascript
-const { BusyBoxHost, MemoryPipe } = require('../examples/host-reference.js');
+import { MemoryPipe, createBusyboxBridge, wrapWasiPipes } from 'busybox-wasi/host';
+
+// 1. Create the `env` imports object providing all host-assisted functions
+const envImports = createBusyboxBridge(hostContext);
+
+// 2. Wrap WASI Preview 1 descriptors to support in-memory pipe routing
+const wrappedWasi = wrapWasiPipes(origWasi, hostContext);
+
+// 3. Assemble WebAssembly instantiation imports
+const importObject = {
+  wasi_snapshot_preview1: wrappedWasi,
+  env: envImports,
+};
+```
+
+### 7.2 Standalone Reference Host (`examples/host-reference.js`)
+
+For Node.js runners and testing harnesses, `BusyBoxHost` wraps `node:wasi` with self-contained execution:
+
+```javascript
+import { BusyBoxHost, MemoryPipe } from './examples/host-reference.js';
 
 // 1. Create host instance with terminal dimensions and custom callbacks
 const host = new BusyBoxHost({

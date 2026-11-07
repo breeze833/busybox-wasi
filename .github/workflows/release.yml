@@ -86,8 +86,8 @@ jobs:
             Automated continuous build from commit `${{ github.sha }}` on `main`.
 
             ### 📦 Downloadable Assets:
-            - **`busybox-wasi-1.38.0.tgz`**: Standard npm tarball ready for installation
-            - **`busybox-wasi-1.38.0.tar.gz`**: Standalone distribution archive (`bin/busybox.wasm`, `bin/cli.js`, `package.json`, `README.md`)
+            - **`busybox-wasi-1.38.0.tgz`**: Standard npm tarball ready for installation (contains `bin/busybox.wasm`, `bin/cli.js`, and browser-safe `src/host.js`)
+            - **`busybox-wasi-1.38.0.tar.gz`**: Standalone distribution archive (`bin/busybox.wasm`, `bin/cli.js`, `src/host.js`, `package.json`, `README.md`)
             - **`busybox.wasm`**: Standalone WebAssembly binary targeting WASI Preview 1
             - **`cli.js`**: Standalone Node.js CLI runner
           prerelease: true

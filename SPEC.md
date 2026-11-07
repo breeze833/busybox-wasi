@@ -55,6 +55,7 @@ busybox-wasi/
 │   ├── ash-complete-hostbuiltin.patch
 │   └── applet-interrupt.patch
 ├── src/
+│   ├── host.js                # Browser-safe, zero-dependency host bridge module & MemoryPipe
 │   └── shim/                  # WASI Preview 1 compatibility shims & setjmp runtime
 │       ├── wasi_compat.h
 │       ├── wasistubs.c
@@ -195,7 +196,21 @@ Because upstream BusyBox assumes a conventional Linux/POSIX kernel, the followin
    - `busybox.wasm`: Standalone multicall WebAssembly binary (~453 KB uncompressed, ~177 KB gzipped).
    - `busybox-wasi-1.38.0.tar.gz`: Standalone distribution archive containing `bin/busybox.wasm`, `bin/cli.js`, `package.json`, and `README.md`.
    - `busybox-wasi-1.38.0.tgz`: Standard npm package tarball for direct dependency installation.
-2. **Distribution & CI/CD Pipeline (`.github/workflows/release.yml`)**:
+
+2. **NPM Package Exports Contract (`package.json`)**:
+   The package is published as an ES module supporting direct Node.js execution and browser / Web Worker integration:
+   - **`"type": "module"`**
+   - **CLI Entry Point (`.` / `"main"`)**: `./bin/cli.js` for command-line execution and shell scripts.
+   - **Host Bridge Subpath Export (`./host`)**: `./src/host.js` for downstream embedding in browser IDEs and custom WASI runtimes:
+     ```javascript
+     import { MemoryPipe, createBusyboxBridge, wrapWasiPipes } from 'busybox-wasi/host';
+     ```
+   - **Exported Symbols**:
+     - `MemoryPipe`: FIFO in-memory byte buffer with chunk queuing, offset tracking, and write-reference counting (`write()`, `read()`, `close()`).
+     - `createBusyboxBridge(options)`: Factory function returning the WebAssembly `env` imports (`__host_pipe`, `__host_dup`, `__host_dup2`, `__host_winsize`, `__host_winch`, `__host_interrupt`, `__host_trace`, `__host_builtin_lookup`, `__host_builtin_name`, `__host_builtin_run`, `wasi_host_spawn`, `__host_sock_*`).
+     - `wrapWasiPipes(wasiImports, state)`: Interceptor routing standard WASI `fd_read`, `fd_write`, `fd_close`, and `fd_renumber` through `MemoryPipe` descriptors.
+
+3. **Distribution & CI/CD Pipeline (`.github/workflows/release.yml`)**:
    - **Push to `main`**: Automatically rebuilds, verifies tests, resets and updates the rolling `latest` git tag, and publishes the `latest` pre-release assets on GitHub Releases.
    - **Versioned Tag (`v*`)**: Automatically builds and publishes a permanent versioned GitHub Release.
    - Downstream consumers (e.g. `wasm-c-ide`) can directly download prebuilt release binaries without compilation overhead.
