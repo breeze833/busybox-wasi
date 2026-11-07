@@ -83,6 +83,10 @@ busybox-wasi/
 │   └── busybox-wasi-1.37.0.patch # Platform patches for upstream BusyBox
 ├── src/
 │   └── wasi_spawn.c           # Host-assisted spawn bridge (wasi_host_spawn)
+├── docs/                      # Technical documentation & host architecture
+│   └── HOST_FUNCTIONS.md      # Specification of WASI host-assisted functions
+├── examples/                  # Reference implementations for host embeddings
+│   └── host-reference.js      # Complete standalone WASI host & MemoryPipe runner
 ├── scripts/
 │   └── build.sh               # Fetch, patch, configure, compile, and optimize
 ├── bin/

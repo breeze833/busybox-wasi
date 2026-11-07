@@ -25,9 +25,7 @@ WASI_SDK_VERSION="${WASI_SDK_VERSION:-29.0}"
 WASI_SDK_MAJOR="${WASI_SDK_VERSION%%.*}"
 
 if [ -z "${WASI_SDK_PATH:-}" ] || [ ! -x "${WASI_SDK_PATH}/bin/clang" ]; then
-  if [ -x "/home/breeze/work/projects/clang-wasi/wasi-sdk/bin/clang" ]; then
-    export WASI_SDK_PATH="/home/breeze/work/projects/clang-wasi/wasi-sdk"
-  elif [ -x "${BUILD_DIR}/wasi-sdk/bin/clang" ]; then
+  if [ -x "${BUILD_DIR}/wasi-sdk/bin/clang" ]; then
     export WASI_SDK_PATH="${BUILD_DIR}/wasi-sdk"
   else
     echo "wasi-sdk not found. Downloading wasi-sdk-${WASI_SDK_VERSION}..."

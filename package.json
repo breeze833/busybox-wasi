@@ -12,7 +12,9 @@
     "bin/busybox.wasm",
     "README.md",
     "LICENSE",
-    "SPEC.md"
+    "SPEC.md",
+    "docs/HOST_FUNCTIONS.md",
+    "examples/host-reference.js"
   ],
   "scripts": {
     "build": "./scripts/build.sh",

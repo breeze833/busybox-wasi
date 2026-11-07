@@ -67,6 +67,10 @@ busybox-wasi/
 │   ├── busybox.wasm           # Standalone WebAssembly multicall binary (~453 KB)
 │   └── cli.js                 # Zero-dependency Node.js CLI runner
 ├── dist/                      # Packaged release archives (.tar.gz and .tgz)
+├── docs/                      # Technical documentation & host architecture
+│   └── HOST_FUNCTIONS.md      # Specification of WASI host-assisted functions
+├── examples/                  # Reference implementations for host embeddings
+│   └── host-reference.js      # Complete standalone WASI host & MemoryPipe runner
 ├── .github/
 │   └── workflows/
 │       └── release.yml        # CI/CD workflow with rolling latest tag & releases
@@ -77,18 +81,16 @@ busybox-wasi/
 
 ---
 
-## 4. Applet Selection & Configuration Specification
+## 4. Command Classification & Configuration Specification
 
-The configuration (`configs/wasi_defconfig`) is intentionally curated for programming, build workflows, and educational shell usage:
+Commands accessible in `busybox-wasi` fall into three distinct architectural categories:
+1. **Multicall Applets**: Independent command-line utilities compiled into the binary, callable directly via `bin/cli.js <applet>` or from `ash` via standalone resolution (`CONFIG_FEATURE_SH_STANDALONE=y`).
+2. **Internal Shell Builtins**: Commands implemented directly within the `ash` interpreter that manipulate shell state (environment, directory, variables, execution flow) without external dispatch.
+3. **Host-Assisted Commands (`CMDHOST`)**: Dynamic JavaScript-backed commands provided by the WASI host embedding through the `env.__host_builtin_*` import interface.
 
-### 4.1 Shell & Core Interpreter
-- `ash`: Primary POSIX shell.
-- `CONFIG_FEATURE_SH_STANDALONE=y`: Applets are resolved internally before attempting external process execution.
-- `CONFIG_ASH_INTERNAL_GLOB=y`: Internal globbing engine without external libc glob dependencies.
-- `CONFIG_ASH_OPTIMIZE_FOR_SIZE=y`: Lean bytecode and memory footprint.
-- Builtins: `test`, `[`, `[[`, `echo`, `printf`, `pwd`, `read`, `export`, `set`, `unset`, `source` / `.`, `eval`, `exec`, `exit`, `type`, `kill` (stubbed).
+---
 
-### 4.2 Text Processing & Filtering
+### 4.1 Multicall Applets: Text Processing & Filtering
 - `grep`, `egrep`, `fgrep`
 - `sed` (stream editor)
 - `awk` (pattern scanning and processing language)
@@ -96,20 +98,48 @@ The configuration (`configs/wasi_defconfig`) is intentionally curated for progra
 - `cut`, `tr`, `sort`, `uniq`, `paste`, `comm`, `cmp`, `diff`
 - `tee`, `fold`, `xargs`, `dirname`, `basename`
 
-### 4.3 File & Directory Management
+### 4.2 Multicall Applets: File & Directory Management
 - `ls` (with coloring and formatting options)
 - `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`
 - `readlink`, `stat`, `du`, `find`
 - Archiving: `tar`, `gzip`, `gunzip`
 
-### 4.4 Scripting & Utility
+### 4.3 Multicall Applets: Math & Scripting Utilities
 - `expr`, `bc`, `dc`
 - `sleep`, `date`
-- `time` (shell keyword/builtin)
 - `true`, `false`, `yes`, `which`
-- `env` (shell builtin avoiding external execve)
 
-### 4.5 Excluded Applets
+### 4.4 Multicall Applets: Checksums & Data Utilities
+- Checksums: `md5sum`, `sha1sum`, `sha256sum`, `cksum`, `crc32`
+- Stream & Text: `seq`, `tac`, `mktemp`, `realpath`, `unlink`
+- System & Inspection: `uname`, `printenv`, `xxd`, `hexdump`
+
+### 4.5 Internal Shell Builtins (`ash`)
+These commands execute in-process inside `ash`, modifying or inspecting internal shell state:
+- `env`: Dumps current process environment or executes a command with modified environment variables without invoking external `execve`.
+- `pwd`: Prints the current working directory from shell state.
+- `cd`: Navigates filesystem directories, supporting `-` (previous directory) and `$HOME`.
+- `read`: Reads input from stdin into shell variables with delimiter support.
+- `export`, `set`, `unset`: Controls shell variables, export flags, and shell runtime options.
+- `eval`: Dynamically constructs and executes shell command strings.
+- `exec`: Replaces or redirects shell file descriptors.
+- `exit`: Exits the current subshell or script with specified status code.
+- `type`, `command -v`: Queries command resolution (`builtin`, `applet`, `host builtin`).
+- `test`, `[`, `[[`: Evaluates file tests, string comparisons, and arithmetic expressions.
+- `times`: Reports process user and system CPU times.
+- `source` / `.`: Evaluates shell scripts within the current shell context.
+- `kill`: Stubbed process signal builtin.
+
+### 4.6 Host-Assisted Builtins (`CMDHOST`)
+Commands registered dynamically by the embedding WASI host (e.g. `bin/cli.js`, `wasm-c-ide`) via the `env.__host_builtin_*` import interface:
+- **Registration**: The host registers command names. `ash` resolves them to `CMDHOST` via `__host_builtin_lookup(name, len)` before path search.
+- **Execution**: `ash` calls `__host_builtin_run(cwd, argc, argv, envp)`. The host receives the current working directory, command arguments, and current exported shell environment, executing with inherited stdin, stdout, and stderr descriptors.
+- **Sample Host Builtins**:
+  - `time <cmd> [args...]`: Host-implemented execution timer. Measures high-resolution duration (`performance.now()`), executes the target command, and prints standard timing metrics (`real 0mX.XXXs`).
+  - `host_echo [args...]`: Diagnostic host command echoing arguments and environment keys to verify host bridge integrity.
+  - `wasi_host_spawn`: Host bridge to execute external WebAssembly binaries (`clang`, `make`, `./a.out`).
+
+### 4.7 Excluded Applets
 - All networking (`CONFIG_FEATURE_IPV6`, `wget`, `ping`, `nc`, `telnet`, `ftp`, `ip`, `route`, etc.).
 - All process monitoring requiring `/proc` (`ps`, `top`, `killall`, `pgrep`).
 - All disk partitioning, filesystem mounting, and block devices (`fdisk`, `mount`, `umount`, `mkfs`).
@@ -172,7 +202,88 @@ Because upstream BusyBox assumes a conventional Linux/POSIX kernel, the followin
 
 ---
 
-## 8. Acknowledgements
+## 8. Testing & Verification Specification
+
+To ensure robust multicall execution on WASI Preview 1 and prevent regressions across BusyBox upgrades and toolchain changes, automated tests must execute against `bin/busybox.wasm` via `bin/cli.js` (`npm test`) covering the curated applets:
+
+### 8.1 Text Processing & Stream Utilities (`test/test-applets.js`)
+- **Output & Formatting**: `echo`, `printf` (string, integer, newline formatting).
+- **Pattern Matching & Transformation**:
+  - `grep`, `egrep`, `fgrep`: basic, extended regex, and fixed strings matching over stdin and files.
+  - `sed`: substitution, global replacements, and regex addressing.
+  - `awk`: field splitting, column reordering, pattern expressions.
+  - `tr`: character translation, uppercase/lowercase conversions.
+- **Slicing, Ordering & Aggregation**:
+  - `cat`: stream concatenations and file reads.
+  - `head`, `tail`: line limits (`-n`) and offsets.
+  - `cut`: delimiter-based column extraction (`-d`, `-f`).
+  - `sort`, `uniq`: lexicographical ordering, duplicate deduplication.
+  - `paste`, `comm`: column joining and set comparison.
+  - `wc`: word, line, and byte counting (`-w`, `-l`, `-c`).
+  - `fold`: line wrapping at specified column width (`-w`).
+  - `tee`: stdout duplication to file and terminal stream.
+  - `xargs`: argument batching (`-n`) and execution.
+- **Path Transformation**: `dirname`, `basename`.
+- **Comparison & Reversal**: `cmp`, `diff -u`, `tac`.
+
+### 8.2 File & Directory Management (`test/test-applets.js`)
+- **Lifecycle Sequence**:
+  - `mkdir -p`: creating nested subdirectories.
+  - `touch`: creating files and updating mtimes.
+  - `stat`: querying file and directory attributes.
+  - `ls`: directory listing, detailed format (`-la`).
+  - `cp`: file copy, recursive directory copy.
+  - `mv`: file renaming and moving into subdirectories.
+  - `find`: traversing directory tree by name or type (`-name`, `-type`).
+  - `du`: directory disk usage reporting.
+  - `readlink`, `realpath`: symlink and path canonicalization.
+  - `rm`: file and recursive directory deletion (`-rf`).
+  - `rmdir`: empty directory removal.
+  - `unlink`: single file removal.
+
+### 8.3 Archiving & Compression (`test/test-applets.js`)
+- **Gzip & Gunzip**:
+  - Compressing stream or file with `gzip`.
+  - Decompressing with `gunzip` verifying byte-exact round-trip.
+- **Tar Archiving**:
+  - Packaging files with `tar -cf` or `tar -czf`.
+  - Listing contents with `tar -tf`.
+  - Extracting archive with `tar -xf` validating restored hierarchy and content integrity.
+
+### 8.4 Math & Core Scripting Utilities (`test/test-applets.js`)
+- **Math**: `expr` (arithmetic expressions), `bc` (multi-precision calculator), `dc` (reverse-polish calculator).
+- **Core Utilities**: `true` (exit 0), `false` (exit 1), `yes` (continuous output truncated via pipe), `which` (path resolution), `pwd` (working directory), `date` (timestamp generation), `sleep` (timer delay), `seq` (number sequences), `uname` (system information), `printenv` (environment variables).
+
+### 8.5 Checksums & Encodings (`test/test-applets.js`)
+- **Cryptographic & Non-Cryptographic Checksums**:
+  - `md5sum`, `sha1sum`, `sha256sum`: verifying known test vectors against string inputs.
+  - `cksum`, `crc32`: POSIX checksum and cyclic redundancy checks.
+- **Binary Inspection**: `xxd`, `hexdump` formatting of binary streams.
+
+### 8.6 Ash Shell Scripting (`test/test-ash.js`)
+- Control flow: `for`, `while`, `until`, `if-then-else`, `case`.
+- Variables, parameter expansions, and arithmetic expressions (`$((...))`).
+- Shell functions and local variable scoping.
+- Command substitution (`$(...)`) and in-memory pipe integration via `__host_pipe`.
+- Unknown external command error handling ($? = 127).
+
+### 8.7 Internal Shell Builtins (`test/test-ash.js`)
+- `env`: Environment inspection and variable dumping.
+- `pwd` and `cd`: Path navigation, directory switching, and working directory querying.
+- `read`: Standard input stream parsing into shell variables.
+- `export`, `set`, `unset`: Variable propagation across subshells and option toggling.
+- `eval`: Dynamic command construction and evaluation.
+- `type` and `command -v`: Resolution of builtins (`type echo`), applets (`type sed`), and host builtins (`type time`).
+- `test` and `[`: File existence, directory checks, string comparisons, and numeric tests.
+- `times`: Process execution time reporting.
+
+### 8.8 Host-Assisted Builtin Execution (`test/test-ash.js`)
+- `time`: Host-implemented timing wrapper measuring command elapsed wall time (`real 0mX.XXXs`).
+- Sample host command (e.g. `host_echo`): Verification of argument forwarding, environment passing (`envp`), and custom exit code propagation via `__host_builtin_run`.
+
+---
+
+## 9. Acknowledgements
 
 This distribution's WASI Preview 1 port architecture builds upon and adapts the research and implementation by **Alexandre Gaigalas** ([@alganet](https://github.com/alganet)) in [**`alganet/wasi-sh`**](https://github.com/alganet/wasi-sh), notably:
 - The fork-free in-memory subshell and pipeline architecture (`ash-forkfree.patch`).

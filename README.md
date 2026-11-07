@@ -14,14 +14,18 @@ Designed as a lightweight, sandboxed Unix utility suite and scripting engine for
   - Shell variables, parameter expansions, and arithmetic expressions (`$((...))`).
   - Shell functions and local variables.
   - In-process command substitution `$(...)` and pipelines.
-- **Curated Unix Applets (~453 KB uncompressed, ~177 KB gzipped)**:
+- **Curated Unix Applets & Shell (~374 KB uncompressed, ~150 KB gzipped)**:
   - **Text Processing**: `grep`, `egrep`, `fgrep`, `sed`, `awk`, `cat`, `head`, `tail`, `wc`, `cut`, `tr`, `sort`, `uniq`, `paste`, `comm`, `cmp`, `diff`, `tee`, `fold`, `xargs`, `dirname`, `basename`.
   - **Files & Directories**: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `readlink`, `stat`, `du`, `find`, `tar`, `gzip`, `gunzip`.
-  - **Math & Utilities**: `expr`, `bc`, `dc`, `sleep`, `date`, `true`, `false`, `yes`, `which`, `time (builtin)`, `env (builtin)`.
+  - **Math & Utilities**: `expr`, `bc`, `dc`, `sleep`, `date`, `true`, `false`, `yes`, `which`.
+  - **Checksums & Inspection**: `md5sum`, `sha1sum`, `sha256sum`, `cksum`, `crc32`, `seq`, `tac`, `mktemp`, `realpath`, `unlink`, `uname`, `printenv`, `xxd`, `hexdump`.
+  - **Internal Shell Builtins**: `env`, `pwd`, `cd`, `read`, `export`, `set`, `unset`, `eval`, `type`, `test` / `[`, `times`.
+  - **Host-Assisted Commands**: `time` (wall-clock profiler), `host_echo`, and `wasi_host_spawn` for external Wasm execution.
 - **Host-Assisted Process Execution**:
   - Transparently integrates with host runtimes (e.g. `wasm-c-ide` or Node.js) via host import hooks to execute external WebAssembly modules (`clang`, `make`, `./a.out`) without requiring kernel `fork()`/`exec()`.
-- **Zero-Dependency CLI Runner**:
+- **Zero-Dependency CLI Runner & Reference Host**:
   - Includes `bin/cli.js` runnable out of the box with Node.js `node:wasi`.
+  - Includes `examples/host-reference.js` providing a standalone reference implementation for external embedding.
 
 ---
 
@@ -44,18 +48,21 @@ node bin/cli.js sed 's/foo/bar/g' file.txt
 ## Building from Source
 
 ### Prerequisites
-- Clang targeting `wasm32-wasi` from **`clang-wasi`** (`/home/breeze/work/projects/clang-wasi/wasi-sdk`) or standard `wasi-sdk`.
+- Clang targeting `wasm32-wasi` from standard `wasi-sdk` (recommended: `wasi-sdk >= 26`, default: `29.0`) or `clang-wasi`.
 - Node.js (>= 18) for test verification.
 
 ### Build Commands
 
 ```bash
-# Build binary using clang-wasi toolchain
+# Build binary using wasi-sdk toolchain
 make build
 # (outputs bin/busybox.wasm)
 
 # Run test suite
 npm test
+
+# Run standalone host reference implementation
+node examples/host-reference.js
 
 # Create release packages (.tar.gz and .tgz in dist/)
 make dist
@@ -73,9 +80,11 @@ A GitHub Actions workflow ([`.github/workflows/release.yml`](.github/workflows/r
 
 ---
 
-## Architecture & Specification
+## Architecture & Documentation
 
-For detailed architectural decisions, WASI patch sets, memory layout, and applet configurations, see [SPEC.md](SPEC.md).
+- [**`SPEC.md`**](SPEC.md): Technical specification, architectural decisions, and verification matrix.
+- [**`docs/HOST_FUNCTIONS.md`**](docs/HOST_FUNCTIONS.md): Specification of all WASI host-assisted functions (`__host_pipe`, `__host_dup`, `__host_dup2`, `__host_builtin_*`, `__host_winsize`, `__host_interrupt`).
+- [**`examples/host-reference.js`**](examples/host-reference.js): Complete standalone reference implementation of `BusyBoxHost` and `MemoryPipe` with interactive self-tests.
 
 ---
 
