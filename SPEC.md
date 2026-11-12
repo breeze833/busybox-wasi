@@ -157,6 +157,14 @@ Because upstream BusyBox assumes a conventional Linux/POSIX kernel, the followin
 1. **Single-Process In-Memory Applet Invocation**:
    - With `CONFIG_FEATURE_SH_STANDALONE=y`, BusyBox invokes applets by calling their `<applet>_main(argc, argv)` function directly.
    - Global state inside applets is reset or reinitialized between runs (or handled cleanly via BusyBox `run_applet_no_and_exit` / `xfunc` exit handlers).
+   - **Nested Applet Dispatch (`spawn_and_wait`)**:
+     - Parent applets that spawn child utilities (such as `xargs` and `find -exec`) route all applet executions in-process via `run_nofork_applet()`, eliminating reliance on unsupported kernel `vfork()` or `execve()`.
+   - **Common Buffer (`bb_common_bufsiz1`) State Preservation**:
+     - BusyBox applets (including `xargs`, `grep`, `sed`) store their global state structures (`struct globals G`) inside the shared `bb_common_bufsiz1` buffer.
+     - When an applet executes a nested applet through `run_nofork_applet()`, the parent's `bb_common_bufsiz1` memory is preserved inside `nofork_save_area` and restored upon child return, preventing corruption of the parent's argument pointers and option state.
+   - **Nesting Depth & Stdio Drainage**:
+     - Invocation nesting depth (`nofork_depth`) is tracked across both standalone multicall entry (`run_applet_no_and_exit`) and nested child spawns (`spawn_and_wait`).
+     - Stdin drainage (`fflush(stdin)`) occurs exclusively when the outermost applet terminates (`depth == 1`), ensuring multi-batch iterative consumers (such as `xargs -n <N>`) retain buffered input streams across child applet iterations.
 2. **Host-Assisted Process Execution (`wasi_host_spawn`)**:
    - In `shellexec()` / `find_command()`, when a command is not an internal BusyBox applet:
      - Instead of invoking `fork()` and `execve()`, `ash` calls the host import:
@@ -237,7 +245,7 @@ To ensure robust multicall execution on WASI Preview 1 and prevent regressions a
   - `wc`: word, line, and byte counting (`-w`, `-l`, `-c`).
   - `fold`: line wrapping at specified column width (`-w`).
   - `tee`: stdout duplication to file and terminal stream.
-  - `xargs`: argument batching (`-n`) and execution.
+  - `xargs`: argument batching (`-n`) across multiple iterations, stdin persistence, and execution both standalone and within `ash` pipelines.
 - **Path Transformation**: `dirname`, `basename`.
 - **Comparison & Reversal**: `cmp`, `diff -u`, `tac`.
 

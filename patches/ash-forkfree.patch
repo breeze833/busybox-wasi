@@ -4,13 +4,15 @@ Fork-free busybox for wasm32-wasi (see wasi-sh ARCHITECTURE.md):
   __host_pipe-backed in-memory pipes, with subshell isolation built from
   ash's own local-variable machinery; dispatch EVERY applet (not just
   NOFORK-marked ones) through run_nofork_applet() — in-process, no fork.
-- libbb/vfork_daemon_rexec.c: before each in-process applet run, zero
-  bb_common_bufsiz1 (applets like grep keep their globals there and assume
-  a freshly-zeroed process) and clearerr() the shared stdio streams (an
-  applet that drained stdin leaves the EOF flag set, which a forked child
-  would never leak back to the parent); after it, fflush(stdin) so bytes it
-  buffered and never read do not become the next applet's input (`head -1`
-  twice used to print l1 then l2).
+- libbb/vfork_daemon_rexec.c: before each in-process applet run, snapshot
+  and restore bb_common_bufsiz1 in nofork_save_area (applets like xargs, grep
+  keep their globals there, and nested children must not destroy the caller's
+  state) and clearerr() the shared stdio streams; after it, fflush(stdin) at
+  the outermost level only (depth == 1 && spawn_depth == 0) so child applets
+  (e.g. echo under xargs) never drain the parent's unread stdin; dispatch all
+  applet executions in spawn_and_wait() through run_nofork_applet().
+- libbb/appletlib.c: route standalone multicall invocations of non-ash
+  applets through run_nofork_applet() to establish root depth and clean exit.
 
 --- a/shell/ash.c
 +++ b/shell/ash.c
@@ -312,7 +314,7 @@ Fork-free busybox for wasm32-wasi (see wasi-sh ARCHITECTURE.md):
  #include "NUM_APPLETS.h"
  
  #define NOFORK_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_NOFORK))
-@@ -56,6 +57,13 @@
+@@ -56,6 +57,14 @@
   */
  #if NOFORK_SUPPORT
  static jmp_buf die_jmp;
@@ -323,10 +325,33 @@ Fork-free busybox for wasm32-wasi (see wasi-sh ARCHITECTURE.md):
 + * its own input, which corrupts data rather than merely surprising. Drained
 + * in run_nofork_applet() below, at the outermost applet only. */
 +static unsigned nofork_depth;
++static unsigned spawn_depth;
  static void jump(void)
  {
  	/* Special case. We arrive here if NOFORK applet
-@@ -102,6 +110,7 @@
+@@ -79,6 +88,7 @@
+ 	uint32_t option_mask32;
+ 	smallint logmode;
+ 	uint8_t xfunc_error_retval;
++	char bufsiz[COMMON_BUFSIZE];
+ };
+ static void save_nofork_data(struct nofork_save_area *save)
+ {
+@@ -88,6 +98,7 @@
+ 	save->option_mask32 = option_mask32;
+ 	save->logmode = logmode;
+ 	save->xfunc_error_retval = xfunc_error_retval;
++	memcpy(save->bufsiz, bb_common_bufsiz1, COMMON_BUFSIZE);
+ }
+ static void restore_nofork_data(struct nofork_save_area *save)
+ {
+@@ -97,11 +108,13 @@
+ 	option_mask32 = save->option_mask32;
+ 	logmode = save->logmode;
+ 	xfunc_error_retval = save->xfunc_error_retval;
++	memcpy(bb_common_bufsiz1, save->bufsiz, COMMON_BUFSIZE);
+ }
+ 
  int FAST_FUNC run_nofork_applet(int applet_no, char **argv)
  {
  	int rc, argc;
@@ -334,7 +359,7 @@ Fork-free busybox for wasm32-wasi (see wasi-sh ARCHITECTURE.md):
  	struct nofork_save_area old;
  
  	save_nofork_data(&old);
-@@ -117,6 +126,9 @@
+@@ -117,6 +130,9 @@
  	argc = string_array_len(argv);
  
  	/* If xfunc "dies" in NOFORK applet, die_func longjmp's here instead */
@@ -344,7 +369,7 @@ Fork-free busybox for wasm32-wasi (see wasi-sh ARCHITECTURE.md):
  	die_func = jump;
  	rc = setjmp(die_jmp);
  	if (!rc) {
-@@ -138,6 +150,16 @@
+@@ -138,6 +154,16 @@
  		/* xfunc died in NOFORK applet */
  	}
  
@@ -355,9 +380,52 @@ Fork-free busybox for wasm32-wasi (see wasi-sh ARCHITECTURE.md):
 +	 * only: xargs and find -exec run their children through this same
 +	 * function, and the stdin they have buffered is still theirs. */
 +	nofork_depth = depth - 1;
-+	if (depth == 1)
++	if (depth == 1 && spawn_depth == 0)
 +		fflush(stdin);
 +
  	/* Restoring some globals */
  	restore_nofork_data(&old);
  	/* Other globals can be simply reset to defaults */
+@@ -226,22 +252,13 @@
+ {
+ 	int rc;
+ #if ENABLE_FEATURE_PREFER_APPLETS && (NUM_APPLETS > 1)
+-	int a = find_applet_by_name(argv[0]);
++	int a = (argv && argv[0]) ? find_applet_by_name(argv[0]) : -1;
+ 
+ 	if (a >= 0) {
+-		if (APPLET_IS_NOFORK(a))
+-			return run_nofork_applet(a, argv);
+-# if BB_MMU /* NOEXEC needs fork(), thus this is done only on MMU machines: */
+-		if (APPLET_IS_NOEXEC(a)) {
+-			fflush_all();
+-			rc = fork();
+-			if (rc) /* parent or error */
+-				return wait4pid(rc);
+-
+-			/* child */
+-			run_noexec_applet_and_exit(a, argv[0], argv);
+-		}
+-# endif
++		spawn_depth++;
++		rc = run_nofork_applet(a, argv);
++		spawn_depth--;
++		return rc;
+ 	}
+ #endif
+ 	rc = spawn(argv);
+--- a/libbb/appletlib.c
++++ b/libbb/appletlib.c
+@@ -975,6 +975,12 @@
+ 	if (ENABLE_FEATURE_SUID)
+ 		check_suid(applet_no);
+ 
++#if ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_NOFORK
++	if (applet_main[applet_no] != ash_main) {
++		exit(run_nofork_applet(applet_no, argv));
++	}
++#endif
++
+ 	argc = string_array_len(argv);
+ 	xfunc_error_retval = applet_main[applet_no](argc, argv);
+ 

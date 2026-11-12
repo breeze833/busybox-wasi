@@ -176,6 +176,14 @@ console.log('Testing BusyBox applets via wasi...');
   const rXargs = run(['xargs', 'echo'], 'item1 item2 item3');
   assert.strictEqual(rXargs.status, 0);
   assert.strictEqual(rXargs.stdout.trim(), 'item1 item2 item3');
+
+  const rXargsBatch = run(['xargs', '-n', '2'], '1 2 3 4');
+  assert.strictEqual(rXargsBatch.status, 0);
+  assert.strictEqual(rXargsBatch.stdout.trim(), '1 2\n3 4');
+
+  const rXargsPrintf = run(['xargs', '-n', '2', 'printf', 'val:%s %s\n'], '1 2 3 4');
+  assert.strictEqual(rXargsPrintf.status, 0);
+  assert.strictEqual(rXargsPrintf.stdout.trim(), 'val:1 2\nval:3 4');
   console.log('  ✓ xargs');
 }
 

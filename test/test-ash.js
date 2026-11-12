@@ -96,6 +96,10 @@ console.log('Testing BusyBox ash shell scripting in WASI...');
   const r2 = runSh('X=$(printf "3\\n1\\n2\\n" | sort); echo "$X"');
   assert.strictEqual(r2.status, 0);
   assert.strictEqual(r2.stdout.trim(), '1\n2\n3');
+
+  const r3 = runSh('echo 1 2 3 4 | xargs -n 2');
+  assert.strictEqual(r3.status, 0);
+  assert.strictEqual(r3.stdout.trim(), '1 2\n3 4');
   console.log('  ✓ command substitution $(...) and pipelines');
 }
 
