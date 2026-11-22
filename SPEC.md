@@ -1,4 +1,4 @@
-# Project Specification: busybox-wasi
+# Project Specification: busybox-wasi (`1.38.0-build1`)
 
 ## 1. Executive Summary
 
@@ -77,7 +77,8 @@ busybox-wasi/
 │       └── release.yml        # CI/CD workflow with rolling latest tag & releases
 └── test/
     ├── test-applets.js        # Automated unit tests for text & file applets
-    └── test-ash.js            # Automated unit tests for ash loops, conditions, and scripts
+    ├── test-ash.js            # Automated unit tests for ash loops, conditions, and scripts
+    └── test-host.js           # Automated unit tests for MemoryPipe, bridge, attachBusybox, and createBusyboxHostOptions
 ```
 
 ---
@@ -198,30 +199,38 @@ Because upstream BusyBox assumes a conventional Linux/POSIX kernel, the followin
 
 ---
 
-## 7. Packaging & Distribution
+## 7. Packaging & Distribution (`1.38.0-build1`)
 
 1. **Release Artifacts (`dist/`)**:
    - `busybox.wasm`: Standalone multicall WebAssembly binary (~453 KB uncompressed, ~177 KB gzipped).
-   - `busybox-wasi-1.38.0.tar.gz`: Standalone distribution archive containing `bin/busybox.wasm`, `bin/cli.js`, `package.json`, and `README.md`.
-   - `busybox-wasi-1.38.0.tgz`: Standard npm package tarball for direct dependency installation.
+   - `busybox-wasi-1.38.0-build1.tar.gz`: Standalone distribution archive containing `bin/busybox.wasm`, `bin/cli.js`, `src/host.js`, `package.json`, `README.md`, `SPEC.md`, `docs`, and `examples`.
+   - `busybox-wasi-1.38.0-build1.tgz`: Standard npm package tarball for direct dependency installation.
 
 2. **NPM Package Exports Contract (`package.json`)**:
-   The package is published as an ES module supporting direct Node.js execution and browser / Web Worker integration:
+   The package is published as an ES module with zero runtime npm dependencies supporting direct Node.js execution and browser / Web Worker integration:
    - **`"type": "module"`**
    - **CLI Entry Point (`.` / `"main"`)**: `./bin/cli.js` for command-line execution and shell scripts.
-   - **Host Bridge Subpath Export (`./host`)**: `./src/host.js` for downstream embedding in browser IDEs and custom WASI runtimes:
+   - **Host Bridge Subpath Export (`./host`)**: `./src/host.js` for downstream embedding in browser IDEs and custom WASI runtimes (such as [`wasi-host`](https://github.com/breeze833/wasi-host)):
      ```javascript
-     import { MemoryPipe, createBusyboxBridge, wrapWasiPipes } from 'busybox-wasi/host';
+     import {
+       MemoryPipe,
+       createBusyboxBridge,
+       wrapWasiPipes,
+       attachBusybox,
+       createBusyboxHostOptions,
+     } from 'busybox-wasi/host';
      ```
    - **Exported Symbols**:
      - `MemoryPipe`: FIFO in-memory byte buffer with chunk queuing, offset tracking, and write-reference counting (`write()`, `read()`, `close()`).
-     - `createBusyboxBridge(options)`: Factory function returning the WebAssembly `env` imports (`__host_pipe`, `__host_dup`, `__host_dup2`, `__host_winsize`, `__host_winch`, `__host_interrupt`, `__host_trace`, `__host_builtin_lookup`, `__host_builtin_name`, `__host_builtin_run`, `wasi_host_spawn`, `__host_sock_*`).
-     - `wrapWasiPipes(wasiImports, state)`: Interceptor routing standard WASI `fd_read`, `fd_write`, `fd_close`, and `fd_renumber` through `MemoryPipe` descriptors.
+     - `createBusyboxBridge(host)`: Factory function returning the WebAssembly `env` imports (`__host_pipe`, `__host_dup`, `__host_dup2`, `__host_winsize`, `__host_winch`, `__host_interrupt`, `__host_trace`, `__host_builtin_lookup`, `__host_builtin_name`, `__host_builtin_run`, `wasi_host_spawn`, `__host_sock_*`).
+     - `wrapWasiPipes(origWasi, host)`: Interceptor routing standard WASI `fd_read`, `fd_write`, `fd_close`, and `fd_renumber` through `MemoryPipe` descriptors.
+     - `attachBusybox(host, options)`: Attaches BusyBox host fields (`rows`, `cols`, `winchFlag`, `interrupted`, `isInterrupted`, `interruptSeq`, `interruptToken`, `hostBuiltinLookup`, `hostBuiltinRun`, `hostBuiltinName`, `wasiHostSpawn`, `builtins`, `onTrace`) onto any `WasiHost`-compatible instance without subclassing, returning `host`.
+     - `createBusyboxHostOptions(options)`: Produces a `WasiHost` options object composing `attachBusybox`, `wrapWasiPipes`, and `createBusyboxBridge` while preserving caller-supplied `wasiWrapper` and `envProvider` hooks so downstream embeddings (such as `wasm-c-ide` and future IDEs) can use `new WasiHost(createBusyboxHostOptions({ ... }))` directly without custom `WasiHost` subclasses.
+   - **Buffer & Encoding Safety**: `readCString` copies `SharedArrayBuffer`-backed views into an unshared `Uint8Array` before passing to `TextDecoder.decode()` to maintain W3C Encoding Standard compliance.
 
 3. **Distribution & CI/CD Pipeline (`.github/workflows/release.yml`)**:
-   - **Push to `main`**: Automatically rebuilds, verifies tests, resets and updates the rolling `latest` git tag, and publishes the `latest` pre-release assets on GitHub Releases.
-   - **Versioned Tag (`v*`)**: Automatically builds and publishes a permanent versioned GitHub Release.
-   - Downstream consumers (e.g. `wasm-c-ide`) can directly download prebuilt release binaries without compilation overhead.
+   - **Push to `main` & Pull Requests**: Rebuilds `busybox.wasm`, runs the full `npm test` / `make test` verification suite, runs `make dist`, and uploads workflow build artifacts without publishing GitHub Releases.
+   - **Versioned Tag (`v*`, e.g. `v1.38.0-build1`)**: Publishes the versioned GitHub Release (`make_latest: "true"`), force-updates the rolling `latest` git tag to the tagged commit, deletes any stale `latest` release, and republishes the rolling `latest` release (`make_latest: "false"`) with the built assets so GitHub's "Latest" badge stays on the versioned release while `/releases/download/latest/...` remains current.
 
 ---
 
@@ -303,6 +312,10 @@ To ensure robust multicall execution on WASI Preview 1 and prevent regressions a
 ### 8.8 Host-Assisted Builtin Execution (`test/test-ash.js`)
 - `time`: Host-implemented timing wrapper measuring command elapsed wall time (`real 0mX.XXXs`).
 - Sample host command (e.g. `host_echo`): Verification of argument forwarding, environment passing (`envp`), and custom exit code propagation via `__host_builtin_run`.
+
+### 8.9 Host Composition & Bridge Unit Tests (`test/test-host.js`)
+- `attachBusybox`: Verifies BusyBox field initialization, default geometry (`rows: 24`, `cols: 80`), interrupt/winch/builtin callback wiring, and preservation of existing host properties.
+- `createBusyboxHostOptions`: Verifies composable `wasiWrapper` (`wrapWasiPipes`) and `envProvider` (`createBusyboxBridge`) chaining with a mock `WasiHost`-style object without subclassing, forwarding base options and `SharedArrayBuffer`-safe `readCString`.
 
 ---
 

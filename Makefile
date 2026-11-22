@@ -8,6 +8,7 @@ build:
 test:
 	node test/test-applets.js
 	node test/test-ash.js
+	node test/test-host.js
 	node examples/host-reference.js
 
 clean:
@@ -15,5 +16,5 @@ clean:
 
 dist: build
 	mkdir -p dist
-	tar -czf dist/busybox-wasi-1.38.0.tar.gz -C . bin/busybox.wasm bin/cli.js src/host.js package.json README.md SPEC.md docs examples
+	tar -czf dist/busybox-wasi-1.38.0-build1.tar.gz -C . bin/busybox.wasm bin/cli.js src/host.js package.json README.md SPEC.md docs examples
 	npm pack --pack-destination dist/

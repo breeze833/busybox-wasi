@@ -6,8 +6,13 @@
  *   - MemoryPipe: In-memory byte FIFO with chunk queue and write-reference counting
  *   - createBusyboxBridge(hostOrOptions): Builds WebAssembly `env` imports for BusyBox
  *   - wrapWasiPipes(origWasi, hostOrOptions): Wraps WASI fd_read, fd_write, fd_close, fd_renumber
- *   - readCString, readCStringArray: Fast string reading utilities
+ *   - attachBusybox(host, options): Attaches BusyBox host state onto any WasiHost instance
+ *   - createBusyboxHostOptions(options): Builds composable WasiHost options without subclassing
+ *   - readCString, readCStringArray: Fast SAB-safe string reading utilities
  */
+
+const textDecoder = new TextDecoder('utf-8');
+const HAS_SAB = typeof SharedArrayBuffer !== 'undefined';
 
 export class MemoryPipe {
   constructor() {
@@ -59,7 +64,13 @@ export function readCString(memory, ptr) {
   const bytes = new Uint8Array(buf, ptr);
   let end = 0;
   while (end < bytes.length && bytes[end] !== 0) end++;
-  return new TextDecoder().decode(bytes.subarray(0, end));
+  const slice = bytes.subarray(0, end);
+  if (HAS_SAB && buf instanceof SharedArrayBuffer) {
+    const unshared = new Uint8Array(end);
+    unshared.set(slice);
+    return textDecoder.decode(unshared);
+  }
+  return textDecoder.decode(slice);
 }
 
 export function readCStringArray(memory, ptr) {
@@ -432,6 +443,123 @@ export function wrapWasiPipes(origWasi, host = {}) {
   });
 }
 
+const BUSYBOX_OPTION_KEYS = [
+  'rows',
+  'cols',
+  'winchFlag',
+  'interrupted',
+  'isInterrupted',
+  'interruptSeq',
+  'interruptToken',
+  'isWinch',
+  'getRows',
+  'getCols',
+  'hostBuiltinLookup',
+  'hostBuiltinRun',
+  'hostBuiltinName',
+  'wasiHostSpawn',
+  'builtins',
+  'onTrace',
+];
+
+/**
+ * Attaches BusyBox shell/runtime properties onto any WasiHost-compatible host instance
+ * without requiring a subclass.
+ *
+ * @param {Object} host Target host instance (e.g. `wasi-host` `WasiHost`)
+ * @param {Object} [options={}] BusyBox state and callback configuration
+ * @returns {Object} The mutated `host` instance
+ */
+export function attachBusybox(host, options = {}) {
+  if (!host || typeof host !== 'object') {
+    throw new TypeError('attachBusybox requires a target host object');
+  }
+
+  host.rows = options.rows !== undefined ? options.rows : (host.rows !== undefined ? host.rows : 24);
+  host.cols = options.cols !== undefined ? options.cols : (host.cols !== undefined ? host.cols : 80);
+  host.winchFlag = options.winchFlag !== undefined ? options.winchFlag : (host.winchFlag !== undefined ? host.winchFlag : 0);
+  host.interruptToken = options.interruptToken !== undefined
+    ? options.interruptToken
+    : (host.interruptToken !== undefined ? host.interruptToken : 0);
+  host.interruptSeq = options.interruptSeq !== undefined
+    ? options.interruptSeq
+    : (host.interruptSeq !== undefined ? host.interruptSeq : 0);
+
+  if (options.interrupted !== undefined) {
+    host.interrupted = options.interrupted;
+  }
+
+  for (const key of [
+    'isInterrupted',
+    'isWinch',
+    'getRows',
+    'getCols',
+    'hostBuiltinLookup',
+    'hostBuiltinRun',
+    'hostBuiltinName',
+    'wasiHostSpawn',
+    'builtins',
+    'onTrace',
+  ]) {
+    if (options[key] !== undefined) {
+      host[key] = options[key];
+    } else if (!(key in host)) {
+      host[key] = null;
+    }
+  }
+
+  return host;
+}
+
+/**
+ * Builds a composable options object for `wasi-host` (`new WasiHost(createBusyboxHostOptions(options))`)
+ * wiring BusyBox state, `wrapWasiPipes`, and `createBusyboxBridge` while preserving user hooks.
+ *
+ * @param {Object} [options={}] Combined WasiHost + BusyBox options
+ * @returns {Object} Options object ready for `new WasiHost(...)`
+ */
+export function createBusyboxHostOptions(options = {}) {
+  const baseOptions = {};
+  const busyboxOptions = {};
+
+  for (const [key, value] of Object.entries(options)) {
+    if (BUSYBOX_OPTION_KEYS.includes(key)) {
+      busyboxOptions[key] = value;
+    } else {
+      baseOptions[key] = value;
+    }
+  }
+
+  const userWasiWrapper = options.wasiWrapper;
+  const userEnvProvider = options.envProvider;
+
+  const ensureAttached = (host) => {
+    if (host && !host._busyboxAttached) {
+      attachBusybox(host, busyboxOptions);
+      host._busyboxAttached = true;
+    }
+  };
+
+  return {
+    ...baseOptions,
+    wasiWrapper: (wasi, host) => {
+      ensureAttached(host);
+      const base = userWasiWrapper ? userWasiWrapper(wasi, host) : wasi;
+      if (host && typeof host === 'object') {
+        host.origWasi = base;
+      }
+      return wrapWasiPipes(base, host);
+    },
+    envProvider: (host) => {
+      ensureAttached(host);
+      return {
+        ...createBusyboxBridge(host),
+        ...(userEnvProvider ? userEnvProvider(host) : {}),
+      };
+    },
+  };
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     MemoryPipe,
@@ -439,5 +567,7 @@ if (typeof module !== 'undefined' && module.exports) {
     readCStringArray,
     createBusyboxBridge,
     wrapWasiPipes,
+    attachBusybox,
+    createBusyboxHostOptions,
   };
 }

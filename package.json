@@ -1,6 +1,6 @@
 {
   "name": "busybox-wasi",
-  "version": "1.38.0",
+  "version": "1.38.0-build1",
   "description": "BusyBox ash shell and core utilities compiled for WASI Preview 1",
   "type": "module",
   "main": "bin/cli.js",
@@ -23,10 +23,10 @@
   ],
   "scripts": {
     "build": "./scripts/build.sh",
-    "test": "node test/test-applets.js && node test/test-ash.js && node examples/host-reference.js",
+    "test": "node test/test-applets.js && node test/test-ash.js && node test/test-host.js && node examples/host-reference.js",
     "test:applets": "node test/test-applets.js",
     "test:ash": "node test/test-ash.js",
-    "test:host": "node examples/host-reference.js",
+    "test:host": "node test/test-host.js && node examples/host-reference.js",
     "pack": "mkdir -p dist && npm pack --pack-destination dist/"
   },
   "keywords": [

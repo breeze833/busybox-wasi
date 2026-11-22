@@ -73,10 +73,9 @@ make dist
 ## CI/CD & Automated Releases
 
 A GitHub Actions workflow ([`.github/workflows/release.yml`](.github/workflows/release.yml)) is configured to:
-- Automatically rebuild and run the full test suite on each push to `main` and on Pull Requests.
-- Reset and force-update the rolling **`latest`** git tag so GitHub's automatic source zip archive always matches the latest commit on `main`.
-- Publish precompiled release artifacts (`busybox.wasm`, `cli.js`, `busybox-wasi-1.38.0.tar.gz`, `busybox-wasi-1.38.0.tgz`) to the **`latest`** GitHub release.
-- Automatically publish versioned GitHub releases when pushing a version tag (e.g., `v1.38.0`).
+- Automatically rebuild, run the full `npm test` / `make test` suite, and package release archives on pushes to `main` and on Pull Requests.
+- Publish GitHub Releases only when a **`v*`** version tag is pushed (e.g., `v1.38.0-build1`), marking that versioned release as Latest (`make_latest: "true"`).
+- Force-update the rolling **`latest`** git tag and republish the rolling `latest` release (`make_latest: "false"`) with `busybox.wasm`, `cli.js`, `busybox-wasi-1.38.0-build1.tar.gz`, and `busybox-wasi-1.38.0-build1.tgz`.
 
 ---
 
@@ -95,15 +94,32 @@ Downstream projects (e.g. `wasm-c-ide`) can directly install the published npm p
 ```json
 {
   "dependencies": {
-    "busybox-wasi": "https://github.com/breeze833/busybox-wasi/releases/download/latest/busybox-wasi-1.38.0.tgz"
+    "busybox-wasi": "https://github.com/breeze833/busybox-wasi/releases/download/v1.38.0-build1/busybox-wasi-1.38.0-build1.tgz"
   }
 }
 ```
 
-And import the modular host bridge and in-memory pipe engine in JavaScript/TypeScript:
+And compose directly with [`wasi-host`](https://github.com/breeze833/wasi-host) without subclassing `WasiHost`:
 
 ```javascript
-import { MemoryPipe, createBusyboxBridge, wrapWasiPipes } from 'busybox-wasi/host';
+import { WasiHost } from 'wasi-host';
+import {
+  MemoryPipe,
+  createBusyboxBridge,
+  wrapWasiPipes,
+  attachBusybox,
+  createBusyboxHostOptions,
+} from 'busybox-wasi/host';
+
+const host = new WasiHost(createBusyboxHostOptions({
+  vfs,
+  cwd: '/workspace',
+  argv: ['busybox', 'sh', '-c', 'echo hi | grep hi'],
+  rows: 24,
+  cols: 80,
+  hostBuiltinLookup: (name) => name === 'gcc',
+  hostBuiltinRun: ({ argv }) => 0,
+}));
 ```
 
 ---

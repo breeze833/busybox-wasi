@@ -79,10 +79,9 @@ busybox-wasi/
 ├── Makefile                   # Build, test, clean, and release targets
 ├── configs/
 │   └── wasi_defconfig         # Tailored BusyBox Kconfig for wasm32-wasip1
-├── patches/
-│   └── busybox-wasi-1.37.0.patch # Platform patches for upstream BusyBox
+├── patches/                   # Modular WASI Preview 1 patches for upstream BusyBox (ash-forkfree, ash-hostbuiltin, etc.)
 ├── src/
-│   ├── host.js                # Browser-safe, zero-dependency host bridge module & MemoryPipe
+│   ├── host.js                # Zero-dependency host bridge, MemoryPipe, attachBusybox, and createBusyboxHostOptions
 │   └── shim/                  # WASI Preview 1 compatibility shims & setjmp runtime
 ├── docs/                      # Technical documentation & host architecture
 │   └── HOST_FUNCTIONS.md      # Specification of WASI host-assisted functions
@@ -96,7 +95,8 @@ busybox-wasi/
 ├── dist/                      # (Generated) Packaged release archives
 └── test/
     ├── test-applets.js        # Automated unit tests for text & file utilities
-    └── test-ash.js            # Automated unit tests for ash loops & scripting
+    ├── test-ash.js            # Automated unit tests for ash loops & scripting
+    └── test-host.js           # Automated unit tests for MemoryPipe, attachBusybox, and createBusyboxHostOptions
 ```
 
 ---
@@ -110,7 +110,7 @@ make build
 
 # Run automated test suite
 npm test
-# (or: node test/test-applets.js && node test/test-ash.js)
+# (or: node test/test-applets.js && node test/test-ash.js && node test/test-host.js && node examples/host-reference.js)
 
 # Package release tarball
 make dist
